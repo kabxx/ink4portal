@@ -82,6 +82,17 @@ export type RenderOptions = {
 	incrementalRendering?: boolean;
 
 	/**
+	Reserve a terminal line after non-fullscreen interactive output.
+
+	Disable this for persistent interfaces that need their final rendered row to
+	remain flush with the bottom of the terminal. Ink still writes a newline when
+	the app exits so the shell prompt starts on a fresh line.
+
+	@default true
+	*/
+	reserveTrailingLine?: boolean;
+
+	/**
 	Enable React Concurrent Rendering mode.
 
 	When enabled:
@@ -209,6 +220,7 @@ const render = (
 		patchConsole: true,
 		maxFps: 30,
 		incrementalRendering: false,
+		reserveTrailingLine: true,
 		concurrent: false,
 		alternateScreen: false,
 		...getOptions(options),

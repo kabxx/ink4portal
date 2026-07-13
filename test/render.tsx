@@ -446,6 +446,59 @@ test.serial(
 );
 
 test.serial(
+	'reserveTrailingLine=false keeps non-fullscreen output flush and adds a newline on exit',
+	t => {
+		const stdout = createStdout();
+		stdout.rows = 5;
+		const {unmount} = render(<Text>Input</Text>, {
+			stdout,
+			reserveTrailingLine: false,
+		});
+
+		const initialContent = stdout.getWrites().filter(isRenderContent).at(-1);
+		t.is(stripAnsi(initialContent ?? ''), 'Input');
+
+		const writeCountBeforeUnmount = stdout.getWrites().length;
+		unmount();
+		t.true(stdout.getWrites().slice(writeCountBeforeUnmount).includes('\n'));
+	},
+);
+
+test.serial(
+	'full-clear output includes the trailing line recorded by log-update',
+	t => {
+		withFakeClock(clock => {
+			const stdout = createStdout();
+			stdout.rows = 3;
+			const writes = captureWrites(stdout);
+			const {rerender, unmount} = render(
+				<Box flexDirection="column">
+					<Text>A</Text>
+					<Text>B</Text>
+					<Text>C</Text>
+					<Text>D</Text>
+				</Box>,
+				{stdout, maxFps: 1},
+			);
+
+			try {
+				writes.length = 0;
+				rerender(<Text>Input</Text>);
+				clock.tick(1000);
+
+				const fullClearWrite = writes.find(write =>
+					write.includes(ansiEscapes.clearTerminal),
+				);
+				t.truthy(fullClearWrite);
+				t.true(fullClearWrite?.endsWith('Input\n') ?? false);
+			} finally {
+				unmount();
+			}
+		});
+	},
+);
+
+test.serial(
 	'#442: full terminal-size box should not add an extra scroll line',
 	async t => {
 		const rows = 5;

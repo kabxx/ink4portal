@@ -236,6 +236,7 @@ export type Options = {
 	waitUntilExit?: () => Promise<unknown>;
 	maxFps?: number;
 	incrementalRendering?: boolean;
+	reserveTrailingLine: boolean;
 
 	/**
 	Enable React Concurrent Rendering mode.
@@ -865,6 +866,9 @@ export default class Ink {
 					);
 				} else if (!this.options.debug) {
 					this.log.done();
+					if (!this.options.reserveTrailingLine) {
+						this.options.stdout.write('\n');
+					}
 				}
 			}
 
@@ -1121,7 +1125,10 @@ export default class Ink {
 		// Only apply when writing to a real TTY — piped output always gets trailing newlines.
 		const viewportRows = isTty ? getWindowSize(this.options.stdout).rows : 24;
 		const isFullscreen = isTty && outputHeight >= viewportRows;
-		const outputToRender = isFullscreen ? output : output + '\n';
+		const outputToRender =
+			isFullscreen || !this.options.reserveTrailingLine
+				? output
+				: output + '\n';
 
 		const shouldClearTerminal = shouldClearTerminalForFrame({
 			isTty,
@@ -1138,7 +1145,7 @@ export default class Ink {
 			}
 
 			this.options.stdout.write(
-				ansiEscapes.clearTerminal + this.fullStaticOutput + output,
+				ansiEscapes.clearTerminal + this.fullStaticOutput + outputToRender,
 			);
 			this.lastOutput = output;
 			this.lastOutputToRender = outputToRender;

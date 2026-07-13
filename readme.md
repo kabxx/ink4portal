@@ -2676,6 +2676,17 @@ Default: `false`
 Enable incremental rendering mode which only updates changed lines instead of redrawing the entire output.
 This can reduce flickering and improve performance for frequently updating UIs.
 
+###### reserveTrailingLine
+
+Type: `boolean`\
+Default: `true`
+
+Reserve a terminal line after non-fullscreen interactive output. Set this to `false` for persistent interfaces that need their final rendered row to remain flush with the bottom of the terminal. Ink still writes a newline when the app exits so the shell prompt starts on a fresh line.
+
+```jsx
+render(<MyApp />, {reserveTrailingLine: false});
+```
+
 ###### concurrent
 
 Type: `boolean`\
