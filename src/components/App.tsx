@@ -12,6 +12,14 @@ import React, {
 import cliCursor from 'cli-cursor';
 import {type CursorPosition} from '../log-update.js';
 import {createInputParser} from '../input-parser.js';
+import {getInputFromKeypress, type InternalInputEvent} from '../input-event.js';
+import {
+	createWindowsConsoleInput,
+	shouldUseWindowsConsoleInput,
+	type WindowsConsoleInputBackend,
+	type WindowsConsoleInputEvent,
+	type WindowsConsoleInputOptions,
+} from '../windows-console-input.js';
 import AppContext, {type SuspendTerminal} from './AppContext.js';
 import StdinContext from './StdinContext.js';
 import StdoutContext from './StdoutContext.js';
@@ -24,6 +32,11 @@ import ErrorBoundary from './ErrorBoundary.js';
 const tab = '\t';
 const shiftTab = '\u001B[Z';
 const escape = '\u001B';
+const windowsTerminalWin32InputMode = '\u001B[?9001h';
+
+// A process has one console input queue even when multiple Ink instances use
+// different output streams. Keep a single native reader for that queue.
+const windowsConsoleInputOwners = new WeakMap<NodeJS.ReadStream, symbol>();
 
 type AnimationSubscriber = {
 	readonly callback: (currentTime: number) => void;
@@ -50,6 +63,9 @@ type Props = {
 	readonly setCursorPosition: (position: CursorPosition | undefined) => void;
 	readonly interactive: boolean;
 	readonly renderThrottleMs: number;
+	readonly windowsConsoleInput?: WindowsConsoleInputOptions;
+	readonly preferWindowsConsoleInput: boolean;
+	readonly terminalInputReady?: Promise<void>;
 };
 
 type Focusable = {
@@ -75,6 +91,9 @@ function App({
 	setCursorPosition,
 	interactive,
 	renderThrottleMs,
+	windowsConsoleInput,
+	preferWindowsConsoleInput,
+	terminalInputReady,
 }: Props): React.ReactNode {
 	const [isFocusEnabled, setIsFocusEnabled] = useState(true);
 	const [activeFocusId, setActiveFocusId] = useState<string | undefined>(
@@ -103,6 +122,19 @@ function App({
 	internal_eventEmitter.current.setMaxListeners(Infinity);
 	// Store the currently attached readable listener to avoid stale closure issues
 	const readableListenerRef = useRef<(() => void) | undefined>(undefined);
+	const windowsConsoleInputRef = useRef<WindowsConsoleInputBackend | undefined>(
+		undefined,
+	);
+	const windowsConsoleInputOwnerRef = useRef(
+		Symbol('ink-windows-console-input-owner'),
+	);
+	const windowsConsoleInputGuardRef = useRef<
+		((eventName: string | symbol) => void) | undefined
+	>(undefined);
+	const windowsConsoleInputUnavailableRef = useRef(false);
+	const nodeRawModeEnabledRef = useRef(false);
+	const terminalInputReadyRef = useRef(terminalInputReady === undefined);
+	const inputPausedRef = useRef(false);
 	const inputParserRef = useRef(createInputParser());
 	const pendingInputFlushRef = useRef<NodeJS.Timeout | undefined>(undefined);
 	// Small delay to let chunked escape sequences complete before flushing as literal input.
@@ -207,6 +239,7 @@ function App({
 
 	// Determines if TTY is supported on the provided stdin
 	const isRawModeSupported = stdin.isTTY;
+	const windowsConsoleInputMode = windowsConsoleInput?.mode ?? 'auto';
 
 	const detachReadableListener = useCallback((): void => {
 		if (!readableListenerRef.current) {
@@ -217,19 +250,62 @@ function App({
 		readableListenerRef.current = undefined;
 	}, [stdin]);
 
-	const clearInputState = useCallback((): void => {
-		inputParserRef.current.reset();
-		clearPendingInputFlush();
-		detachReadableListener();
-	}, [clearPendingInputFlush, detachReadableListener]);
+	const removeWindowsConsoleInputGuard = useCallback((): void => {
+		if (!windowsConsoleInputGuardRef.current) {
+			return;
+		}
+
+		stdin.removeListener('newListener', windowsConsoleInputGuardRef.current);
+		windowsConsoleInputGuardRef.current = undefined;
+	}, [stdin]);
+
+	const stopWindowsConsoleInput = useCallback(
+		(releaseOwnership = false): void => {
+			removeWindowsConsoleInputGuard();
+			windowsConsoleInputRef.current?.stop();
+			windowsConsoleInputRef.current = undefined;
+
+			if (
+				releaseOwnership &&
+				windowsConsoleInputOwners.get(stdin) ===
+					windowsConsoleInputOwnerRef.current
+			) {
+				windowsConsoleInputOwners.delete(stdin);
+			}
+		},
+		[stdin, removeWindowsConsoleInputGuard],
+	);
+
+	const clearInputState = useCallback(
+		(releaseWindowsConsoleOwnership = true): void => {
+			stopWindowsConsoleInput(releaseWindowsConsoleOwnership);
+			inputParserRef.current.reset();
+			clearPendingInputFlush();
+			detachReadableListener();
+		},
+		[clearPendingInputFlush, detachReadableListener, stopWindowsConsoleInput],
+	);
+
+	const disableNodeRawMode = useCallback((): void => {
+		if (!nodeRawModeEnabledRef.current) {
+			return;
+		}
+
+		stdin.setRawMode(false);
+		nodeRawModeEnabledRef.current = false;
+	}, [stdin]);
 
 	const disableRawMode = useCallback((): void => {
 		pendingDisableRawModeRef.current = false;
-		stdin.setRawMode(false);
-		stdin.unref();
-		rawModeEnabledCount.current = 0;
-		clearInputState();
-	}, [stdin, clearInputState]);
+		try {
+			clearInputState(false);
+			disableNodeRawMode();
+			stdin.unref();
+		} finally {
+			rawModeEnabledCount.current = 0;
+			stopWindowsConsoleInput(true);
+		}
+	}, [stdin, clearInputState, disableNodeRawMode, stopWindowsConsoleInput]);
 
 	const handleExit = useCallback(
 		(errorOrResult?: unknown): void => {
@@ -246,16 +322,24 @@ function App({
 	);
 
 	const handleInput = useCallback(
-		(input: string): void => {
+		(event: InternalInputEvent): void => {
+			const keypress = typeof event === 'string' ? undefined : event.keypress;
+			const input =
+				typeof event === 'string'
+					? event
+					: getInputFromKeypress(event.keypress);
+
 			// Exit on Ctrl+C
-			// eslint-disable-next-line unicorn/no-hex-escape
-			if (input === '\x03' && exitOnCtrlC) {
+			if (
+				exitOnCtrlC &&
+				(input === '\u0003' || (keypress?.ctrl && input === 'c'))
+			) {
 				handleExit();
 				return;
 			}
 
 			// Reset focus when there's an active focused component on Esc
-			if (input === escape && isFocusEnabled) {
+			if ((input === escape || keypress?.name === 'escape') && isFocusEnabled) {
 				setActiveFocusId(undefined);
 			}
 		},
@@ -263,9 +347,9 @@ function App({
 	);
 
 	const emitInput = useCallback(
-		(input: string): void => {
-			handleInput(input);
-			internal_eventEmitter.current.emit('input', input);
+		(event: InternalInputEvent): void => {
+			handleInput(event);
+			internal_eventEmitter.current.emit('input', event);
 		},
 		[handleInput],
 	);
@@ -283,32 +367,41 @@ function App({
 		}, pendingInputFlushDelayMilliseconds);
 	}, [clearPendingInputFlush, emitInput]);
 
+	const processInputChunk = useCallback(
+		(chunk: string): void => {
+			clearPendingInputFlush();
+			const inputEvents = inputParserRef.current.push(chunk);
+			for (const event of inputEvents) {
+				if (typeof event === 'string') {
+					emitInput(event);
+					continue;
+				}
+
+				// Keep paste on a separate channel from `useInput` so key handlers
+				// don't need to branch on mixed key-vs-paste event shapes.
+				if (internal_eventEmitter.current.listenerCount('paste') === 0) {
+					emitInput(event.paste);
+					continue;
+				}
+
+				internal_eventEmitter.current.emit('paste', event.paste);
+			}
+
+			if (inputParserRef.current.hasPendingEscape()) {
+				schedulePendingInputFlush();
+			}
+		},
+		[emitInput, clearPendingInputFlush, schedulePendingInputFlush],
+	);
+
 	const handleReadable = useCallback((): void => {
 		clearPendingInputFlush();
 		let chunk;
 		// eslint-disable-next-line @typescript-eslint/no-restricted-types
 		while ((chunk = stdin.read() as string | null) !== null) {
-			const inputEvents = inputParserRef.current.push(chunk);
-			for (const event of inputEvents) {
-				if (typeof event === 'string') {
-					emitInput(event);
-				} else {
-					// Keep paste on a separate channel from `useInput` so key handlers
-					// don't need to branch on mixed key-vs-paste event shapes.
-					if (internal_eventEmitter.current.listenerCount('paste') === 0) {
-						emitInput(event.paste);
-						continue;
-					}
-
-					internal_eventEmitter.current.emit('paste', event.paste);
-				}
-			}
+			processInputChunk(chunk);
 		}
-
-		if (inputParserRef.current.hasPendingEscape()) {
-			schedulePendingInputFlush();
-		}
-	}, [stdin, emitInput, clearPendingInputFlush, schedulePendingInputFlush]);
+	}, [stdin, clearPendingInputFlush, processInputChunk]);
 
 	const attachReadableListener = useCallback((): void => {
 		if (readableListenerRef.current) {
@@ -319,6 +412,201 @@ function App({
 		readableListenerRef.current = handleReadable;
 		stdin.addListener('readable', handleReadable);
 	}, [stdin, handleReadable]);
+
+	const enableNodeRawMode = useCallback(
+		(attachReader = true): void => {
+			if (!nodeRawModeEnabledRef.current) {
+				stdin.setRawMode(true);
+				nodeRawModeEnabledRef.current = true;
+			}
+
+			if (attachReader) {
+				attachReadableListener();
+			}
+		},
+		[stdin, attachReadableListener],
+	);
+
+	const handleWindowsConsoleInput = useCallback(
+		(event: WindowsConsoleInputEvent): void => {
+			if (typeof event === 'string') {
+				processInputChunk(event);
+				return;
+			}
+
+			if (event.type === 'resize') {
+				stdout.emit('resize');
+				return;
+			}
+
+			clearPendingInputFlush();
+			const pendingEscape = inputParserRef.current.flushPendingEscape();
+			if (pendingEscape) {
+				emitInput(pendingEscape);
+			}
+
+			emitInput(event);
+		},
+		[processInputChunk, clearPendingInputFlush, emitInput, stdout],
+	);
+
+	const startInputReader = useCallback((): void => {
+		if (!terminalInputReadyRef.current) {
+			enableNodeRawMode(false);
+			return;
+		}
+
+		if (!preferWindowsConsoleInput) {
+			enableNodeRawMode();
+			return;
+		}
+
+		if (windowsConsoleInputRef.current?.isActive()) {
+			return;
+		}
+
+		const useWindowsConsoleInput = shouldUseWindowsConsoleInput({
+			mode: windowsConsoleInputMode,
+			platform: process.platform,
+			isTty: Boolean(stdin.isTTY),
+			isDefaultStdin: stdin === process.stdin,
+			hasStdinListeners:
+				stdin.listenerCount('data') > 0 || stdin.listenerCount('readable') > 0,
+		});
+
+		if (!useWindowsConsoleInput || windowsConsoleInputUnavailableRef.current) {
+			enableNodeRawMode();
+			return;
+		}
+
+		const currentWindowsConsoleInputOwner =
+			windowsConsoleInputOwners.get(stdin);
+		if (
+			currentWindowsConsoleInputOwner &&
+			currentWindowsConsoleInputOwner !== windowsConsoleInputOwnerRef.current
+		) {
+			if (windowsConsoleInputMode === 'enabled') {
+				writeToStderr(
+					'Warning: native Windows console input is already owned by another Ink instance; input is disabled for this instance.\n',
+				);
+			}
+
+			return;
+		}
+
+		detachReadableListener();
+		const backend: WindowsConsoleInputBackend = createWindowsConsoleInput({
+			onEvent: handleWindowsConsoleInput,
+			onError(error) {
+				if (windowsConsoleInputRef.current !== backend) {
+					return;
+				}
+
+				stopWindowsConsoleInput(true);
+				windowsConsoleInputRef.current = undefined;
+				windowsConsoleInputUnavailableRef.current = true;
+				inputParserRef.current.reset();
+				clearPendingInputFlush();
+
+				if (windowsConsoleInputMode === 'enabled') {
+					const message =
+						error instanceof Error ? error.message : String(error);
+					writeToStderr(
+						`Warning: native Windows console input stopped (${message}); falling back to stdin.\n`,
+					);
+				}
+
+				enableNodeRawMode();
+			},
+		});
+		windowsConsoleInputOwners.set(stdin, windowsConsoleInputOwnerRef.current);
+		windowsConsoleInputRef.current = backend;
+
+		try {
+			// ConPTY transports complete KEY_EVENT_RECORD values through this mode.
+			// Enabling it is idempotent and prevents Windows Terminal from reducing
+			// modified Enter keys to an indistinguishable carriage return.
+			if (process.env['WT_SESSION'] && stdout.isTTY) {
+				stdout.write(windowsTerminalWin32InputMode);
+			}
+
+			backend.start();
+			if (windowsConsoleInputRef.current === backend && backend.isActive()) {
+				const handleNewStdinListener = (eventName: string | symbol): void => {
+					if (eventName !== 'data' && eventName !== 'readable') {
+						return;
+					}
+
+					if (windowsConsoleInputRef.current !== backend) {
+						return;
+					}
+
+					stopWindowsConsoleInput(true);
+					windowsConsoleInputUnavailableRef.current = true;
+					inputParserRef.current.reset();
+					clearPendingInputFlush();
+					enableNodeRawMode();
+				};
+
+				windowsConsoleInputGuardRef.current = handleNewStdinListener;
+				stdin.on('newListener', handleNewStdinListener);
+			}
+		} catch (error) {
+			stopWindowsConsoleInput(true);
+			windowsConsoleInputRef.current = undefined;
+			windowsConsoleInputUnavailableRef.current = true;
+			if (windowsConsoleInputMode === 'enabled') {
+				const message = error instanceof Error ? error.message : String(error);
+				writeToStderr(
+					`Warning: native Windows console input is unavailable (${message}); falling back to stdin.\n`,
+				);
+			}
+
+			enableNodeRawMode();
+		}
+	}, [
+		windowsConsoleInputMode,
+		preferWindowsConsoleInput,
+		stdin,
+		stdout,
+		enableNodeRawMode,
+		detachReadableListener,
+		handleWindowsConsoleInput,
+		clearPendingInputFlush,
+		stopWindowsConsoleInput,
+		writeToStderr,
+	]);
+
+	useEffect(() => {
+		if (!terminalInputReady) {
+			return;
+		}
+
+		let isCurrent = true;
+		void terminalInputReady.then(() => {
+			if (!isCurrent) {
+				return;
+			}
+
+			terminalInputReadyRef.current = true;
+			if (rawModeEnabledCount.current === 0 || inputPausedRef.current) {
+				return;
+			}
+
+			detachReadableListener();
+			startInputReader();
+		});
+
+		return () => {
+			isCurrent = false;
+		};
+	}, [
+		terminalInputReady,
+		windowsConsoleInputMode,
+		stdin,
+		detachReadableListener,
+		startInputReader,
+	]);
 
 	const handleSetRawMode = useCallback(
 		(isEnabled: boolean): void => {
@@ -345,10 +633,9 @@ function App({
 
 					if (!isRawModeAlreadyEnabled) {
 						stdin.ref();
-						stdin.setRawMode(true);
 					}
 
-					attachReadableListener();
+					startInputReader();
 				}
 
 				rawModeEnabledCount.current++;
@@ -362,7 +649,7 @@ function App({
 			if (--rawModeEnabledCount.current === 0) {
 				// Stop owning input immediately so pending parser state cannot leak into
 				// a replacement `useInput` component mounted in the same React update.
-				clearInputState();
+				clearInputState(false);
 
 				// Defer only the terminal raw-mode teardown so a same-render replacement
 				// can keep the process ref and raw mode active without a disable/enable cycle.
@@ -379,7 +666,7 @@ function App({
 		[
 			isRawModeSupported,
 			stdin,
-			attachReadableListener,
+			startInputReader,
 			clearInputState,
 			disableRawMode,
 		],
@@ -420,6 +707,7 @@ function App({
 	});
 
 	const pauseInput = useCallback((): void => {
+		inputPausedRef.current = true;
 		const wasRawMode = isRawModeSupported && rawModeEnabledCount.current > 0;
 		const wasBracketedPaste = bracketedPasteModeEnabledCount.current > 0;
 		suspendedInputStateRef.current = {
@@ -434,20 +722,20 @@ function App({
 		}
 
 		if (wasRawMode) {
-			stdin.setRawMode(false);
+			clearInputState(false);
+			disableNodeRawMode();
 			stdin.unref();
-			clearInputState();
 		}
-	}, [isRawModeSupported, stdin, stdout, clearInputState]);
+	}, [isRawModeSupported, stdin, stdout, clearInputState, disableNodeRawMode]);
 
 	const resumeInput = useCallback((): void => {
+		inputPausedRef.current = false;
 		const {rawMode, bracketedPaste} = suspendedInputStateRef.current;
 
 		if (rawMode) {
 			stdin.setEncoding('utf8');
 			stdin.ref();
-			stdin.setRawMode(true);
-			attachReadableListener();
+			startInputReader();
 		}
 
 		if (bracketedPaste && stdout.isTTY) {
@@ -455,7 +743,7 @@ function App({
 				stdout.write('\u001B[?2004h');
 			} catch {}
 		}
-	}, [stdin, stdout, attachReadableListener]);
+	}, [stdin, stdout, startInputReader]);
 
 	// Register input pause/resume in an insertion effect: it runs before every
 	// passive effect (parent and child), so a child that calls suspendTerminal()
@@ -550,14 +838,26 @@ function App({
 
 	// Handle tab navigation via effect that subscribes to input events
 	useEffect(() => {
-		const handleTabNavigation = (input: string): void => {
+		const handleTabNavigation = (event: InternalInputEvent): void => {
 			if (!isFocusEnabled || focusablesCountRef.current === 0) return;
 
-			if (input === tab) {
+			if (typeof event !== 'string') {
+				if (event.keypress.name === 'tab') {
+					if (event.keypress.shift) {
+						focusPrevious();
+					} else {
+						focusNext();
+					}
+				}
+
+				return;
+			}
+
+			if (event === tab) {
 				focusNext();
 			}
 
-			if (input === shiftTab) {
+			if (event === shiftTab) {
 				focusPrevious();
 			}
 		};

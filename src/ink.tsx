@@ -26,6 +26,10 @@ import {
 	type KittyFlagName,
 	resolveFlags,
 } from './kitty-keyboard.js';
+import {
+	shouldUseWindowsConsoleInput,
+	type WindowsConsoleInputOptions,
+} from './windows-console-input.js';
 
 const noop = () => {};
 const textEncoder = new TextEncoder();
@@ -255,6 +259,16 @@ export type Options = {
 	kittyKeyboard?: KittyKeyboardOptions;
 
 	/**
+	Configure the native Windows console input backend. It preserves modifier
+	bits that classic stdin bytes cannot represent, including Shift+Enter.
+	In `auto` mode, an explicit Kitty keyboard configuration retains stdin
+	ownership; `enabled` gives this backend priority.
+
+	@default {mode: 'auto'}
+	*/
+	windowsConsoleInput?: WindowsConsoleInputOptions;
+
+	/**
 	Override automatic interactive mode detection.
 
 	By default, Ink detects whether the environment is interactive based on CI detection (via [`is-in-ci`](https://github.com/sindresorhus/is-in-ci)) and `stdout.isTTY`. Most users should not need to set this.
@@ -329,6 +343,8 @@ export default class Ink {
 	private kittyProtocolEnabled = false;
 	private kittyFlags: KittyFlagName[] | undefined;
 	private cancelKittyDetection?: () => void;
+	private readonly terminalInputReady?: Promise<void>;
+	private readonly preferWindowsConsoleInput: boolean;
 	private nextRenderCommit?: {promise: Promise<void>; resolve: () => void};
 	// Set while suspendTerminal() has handed the terminal to a child process.
 	private isSuspended = false;
@@ -341,6 +357,21 @@ export default class Ink {
 		autoBind(this);
 
 		this.options = options;
+		const windowsConsoleInputMode = options.windowsConsoleInput?.mode ?? 'auto';
+		const kittyInputRequested =
+			options.kittyKeyboard !== undefined &&
+			options.kittyKeyboard.mode !== 'disabled';
+		this.preferWindowsConsoleInput =
+			shouldUseWindowsConsoleInput({
+				mode: windowsConsoleInputMode,
+				platform: process.platform,
+				isTty: Boolean(options.stdin.isTTY),
+				isDefaultStdin: options.stdin === process.stdin,
+				hasStdinListeners:
+					options.stdin.listenerCount('data') > 0 ||
+					options.stdin.listenerCount('readable') > 0,
+			}) &&
+			(windowsConsoleInputMode === 'enabled' || !kittyInputRequested);
 		this.rootNode = dom.createNode('ink-root');
 		this.rootNode.onComputeLayout = this.calculateLayout;
 
@@ -465,7 +496,7 @@ export default class Ink {
 			};
 		}
 
-		this.initKittyKeyboard();
+		this.terminalInputReady = this.initKittyKeyboard();
 
 		this.exitPromise = new Promise((resolve, reject) => {
 			this.resolveExitPromise = resolve;
@@ -681,6 +712,9 @@ export default class Ink {
 					exitOnCtrlC={this.options.exitOnCtrlC}
 					interactive={this.interactive}
 					renderThrottleMs={this.renderThrottleMs}
+					windowsConsoleInput={this.options.windowsConsoleInput}
+					preferWindowsConsoleInput={this.preferWindowsConsoleInput}
+					terminalInputReady={this.terminalInputReady}
 					writeToStdout={this.writeToStdout}
 					writeToStderr={this.writeToStderr}
 					setCursorPosition={this.setCursorPosition}
@@ -1021,6 +1055,9 @@ export default class Ink {
 	async suspendTerminal(
 		callback?: () => void | Promise<void>,
 	): Promise<void | TerminalSuspension> {
+		// Do not hand stdin/stdout to a child while Kitty auto-detection still has
+		// a data listener and may write an enable sequence asynchronously.
+		await this.terminalInputReady;
 		this.beginSuspend();
 
 		if (callback) {
@@ -1183,7 +1220,14 @@ export default class Ink {
 		this.lastOutputHeight = outputHeight;
 	}
 
-	private initKittyKeyboard(): void {
+	private initKittyKeyboard(): Promise<void> | undefined {
+		// A native Windows reader must own the console from the beginning. If it
+		// is preferred, probing Kitty through stdin would create a competing Node
+		// stream reader, so the native backend supplies the structured input.
+		if (this.preferWindowsConsoleInput) {
+			return;
+		}
+
 		// Protocol is opt-in: if kittyKeyboard is not specified, do nothing
 		if (!this.options.kittyKeyboard) {
 			return;
@@ -1221,51 +1265,60 @@ export default class Ink {
 		// The CSI ? u query is safe to send to any terminal — unsupporting
 		// terminals simply won't respond, and the 200ms timeout handles that.
 		// This avoids maintaining a hardcoded whitelist of terminal names.
-		this.confirmKittySupport(flags);
+		return this.confirmKittySupport(flags);
 	}
 
-	private confirmKittySupport(flags: KittyFlagName[]): void {
+	private async confirmKittySupport(flags: KittyFlagName[]): Promise<void> {
 		const {stdin, stdout} = this.options;
 
-		let responseBuffer: number[] = [];
+		await new Promise<void>(resolve => {
+			let responseBuffer: number[] = [];
 
-		const cleanup = (): void => {
-			this.cancelKittyDetection = undefined;
-			clearTimeout(timer);
-			stdin.removeListener('data', onData);
+			const cleanup = (): void => {
+				this.cancelKittyDetection = undefined;
+				clearTimeout(timer);
+				stdin.removeListener('data', onData);
 
-			// Re-emit any buffered data that wasn't the protocol response,
-			// so it isn't lost from Ink's normal input pipeline.
-			// Clear responseBuffer afterwards to make cleanup idempotent.
-			const remaining =
-				stripKittyQueryResponsesAndTrailingPartial(responseBuffer);
-			responseBuffer = [];
-			if (remaining.length > 0) {
-				stdin.unshift(Uint8Array.from(remaining));
-			}
-		};
-
-		const onData = (data: Uint8Array | string): void => {
-			const chunk = typeof data === 'string' ? textEncoder.encode(data) : data;
-			for (const byte of chunk) {
-				responseBuffer.push(byte);
-			}
-
-			if (hasCompleteKittyQueryResponse(responseBuffer)) {
-				cleanup();
-				if (!this.isUnmounted) {
-					this.enableKittyProtocol(flags);
+				// Re-emit any buffered data that wasn't the protocol response,
+				// so it isn't lost from Ink's normal input pipeline.
+				// Clear responseBuffer afterwards to make cleanup idempotent.
+				const remaining =
+					stripKittyQueryResponsesAndTrailingPartial(responseBuffer);
+				responseBuffer = [];
+				if (remaining.length > 0) {
+					stdin.unshift(Uint8Array.from(remaining));
 				}
+
+				resolve();
+			};
+
+			const onData = (data: Uint8Array | string): void => {
+				const chunk =
+					typeof data === 'string' ? textEncoder.encode(data) : data;
+				for (const byte of chunk) {
+					responseBuffer.push(byte);
+				}
+
+				if (hasCompleteKittyQueryResponse(responseBuffer)) {
+					cleanup();
+					if (!this.isUnmounted) {
+						this.enableKittyProtocol(flags);
+					}
+				}
+			};
+
+			// Attach listener before writing the query so that synchronous
+			// or immediate responses are not missed.
+			const timer = setTimeout(cleanup, 200);
+			stdin.on('data', onData);
+			this.cancelKittyDetection = cleanup;
+
+			try {
+				stdout.write('\u001B[?u');
+			} catch {
+				cleanup();
 			}
-		};
-
-		// Attach listener before writing the query so that synchronous
-		// or immediate responses are not missed.
-		stdin.on('data', onData);
-		const timer = setTimeout(cleanup, 200);
-		this.cancelKittyDetection = cleanup;
-
-		stdout.write('\u001B[?u');
+		});
 	}
 
 	private enableKittyProtocol(flags: KittyFlagName[]): void {
@@ -1338,9 +1391,11 @@ export default class Ink {
 
 		this.isSuspended = false;
 
-		// Reclaim input even mid-unmount: pauseInput already ran in beginSuspend, so
-		// restoring it is symmetric regardless of any state change during suspension.
-		this.resumeInput?.();
+		// Reclaim input only while the Ink instance is still alive. React cleanup
+		// may have already disabled raw mode when a suspend callback unmounts it.
+		if (!this.isUnmounted && !this.isUnmounting) {
+			this.resumeInput?.();
+		}
 
 		if (!this.interactive || this.isUnmounted || this.isUnmounting) {
 			return;

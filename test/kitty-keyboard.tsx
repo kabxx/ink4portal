@@ -1,10 +1,11 @@
 import process from 'node:process';
 import EventEmitter from 'node:events';
+import {PassThrough} from 'node:stream';
 import React from 'react';
 import test from 'ava';
 import {stub, spy} from 'sinon';
 import parseKeypress from '../src/parse-keypress.js';
-import {render, Text} from '../src/index.js';
+import {render, Text, useInput} from '../src/index.js';
 
 const textEncoder = new TextEncoder();
 
@@ -686,6 +687,43 @@ test.serial(
 		const strings = getWrittenStrings(write);
 		const enableCount = strings.filter(s => s === '\u001B[>1u').length;
 		t.is(enableCount, 0);
+	},
+);
+
+test.serial(
+	'kitty protocol - auto detection owns stdin until the probe completes',
+	async t => {
+		const {stdout} = createFakeStdout();
+		const stdin = new PassThrough() as PassThrough & NodeJS.ReadStream;
+		stdin.isTTY = true;
+		stdin.setRawMode = stub();
+		stdin.ref = () => {};
+		stdin.unref = () => {};
+		const received: string[] = [];
+
+		function InputReceiver() {
+			useInput(input => {
+				received.push(input);
+			});
+			return null;
+		}
+
+		const {unmount} = render(<InputReceiver />, {
+			stdin,
+			stdout,
+			interactive: true,
+			kittyKeyboard: {mode: 'auto'},
+			windowsConsoleInput: {mode: 'disabled'},
+		});
+
+		stdin.write('\u001B[?1u');
+		await new Promise(resolve => {
+			setTimeout(resolve, 100);
+		});
+
+		t.deepEqual(received, []);
+		unmount();
+		stdin.destroy();
 	},
 );
 

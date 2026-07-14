@@ -4,6 +4,7 @@ import type {ReactNode} from 'react';
 import Ink, {type Options as InkOptions, type RenderMetrics} from './ink.js';
 import instances from './instances.js';
 import {type KittyKeyboardOptions} from './kitty-keyboard.js';
+import {type WindowsConsoleInputOptions} from './windows-console-input.js';
 
 export type RenderOptions = {
 	/**
@@ -116,6 +117,17 @@ export type RenderOptions = {
 	kittyKeyboard?: KittyKeyboardOptions;
 
 	/**
+	Configure native Windows console input. In `auto` mode Ink uses it only for
+	`process.stdin` on a Windows TTY and falls back to the normal stdin parser
+	when the optional native dependency or console handle is unavailable.
+	When Kitty keyboard input is configured, `auto` leaves stdin ownership with
+	Kitty; use `enabled` to give the native reader priority instead.
+
+	@default {mode: 'auto'}
+	*/
+	windowsConsoleInput?: WindowsConsoleInputOptions;
+
+	/**
 	Override automatic interactive mode detection.
 
 	By default, Ink detects whether the environment is interactive based on CI detection (via [`is-in-ci`](https://github.com/sindresorhus/is-in-ci)) and `stdout.isTTY`. Most users should not need to set this.
@@ -223,6 +235,7 @@ const render = (
 		reserveTrailingLine: true,
 		concurrent: false,
 		alternateScreen: false,
+		windowsConsoleInput: {mode: 'auto'},
 		...getOptions(options),
 	};
 

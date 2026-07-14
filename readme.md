@@ -1796,6 +1796,13 @@ Default: `false`
 
 [Meta key](https://en.wikipedia.org/wiki/Meta_key) was pressed.
 
+###### key.altGr
+
+Type: `boolean | undefined`\
+Default: `undefined`
+
+AltGr produced printable text through [native Windows console input](#windowsconsoleinput). For these text events, `key.ctrl` and `key.meta` are `false` so applications do not mistake international keyboard input for a shortcut.
+
 ###### key.super
 
 Type: `boolean`\
@@ -1815,21 +1822,21 @@ Hyper key was pressed. Requires [kitty keyboard protocol](#kittykeyboard).
 Type: `boolean`\
 Default: `false`
 
-Caps Lock was active. Requires [kitty keyboard protocol](#kittykeyboard).
+Caps Lock was active. Available with [kitty keyboard protocol](#kittykeyboard) and [native Windows console input](#windowsconsoleinput).
 
 ###### key.numLock
 
 Type: `boolean`\
 Default: `false`
 
-Num Lock was active. Requires [kitty keyboard protocol](#kittykeyboard).
+Num Lock was active. Available with [kitty keyboard protocol](#kittykeyboard) and [native Windows console input](#windowsconsoleinput).
 
 ###### key.eventType
 
 Type: `'press' | 'repeat' | 'release'`\
 Default: `undefined`
 
-The type of key event. Only available with [kitty keyboard protocol](#kittykeyboard). Without the protocol, this property is `undefined`.
+The type of key event. Available with [kitty keyboard protocol](#kittykeyboard) and [native Windows console input](#windowsconsoleinput). Native Windows input reports press and repeat events; ordinary release records are ignored (Windows Alt+numpad text is preserved from its final Alt release record). With the legacy stdin parser, this property is `undefined`.
 
 #### options
 
@@ -2746,6 +2753,36 @@ Only works in interactive mode. Ignored when `interactive` is `false` or in a no
 ```jsx
 render(<MyApp />, {alternateScreen: true});
 ```
+
+###### windowsConsoleInput
+
+Type: `object`\
+Default: `{mode: 'auto'}`
+
+Configure Ink's native Windows console input backend. Classic Windows stdin represents both `Enter` and `Shift+Enter` as the same carriage-return byte, so the modifier cannot be recovered by a byte parser. The native backend owns the Windows input mode, disables VT input, and reads Win32 `INPUT_RECORD` values so `Shift`, `Ctrl`, `Alt`, Caps Lock, Num Lock, and repeat information reach `useInput`. On Windows Terminal, Ink enables Win32 input mode (`CSI ?9001h`) when available; older Terminal versions use a narrow compatibility fallback only for modified Enter records.
+
+It is only selected for an interactive Windows TTY using the default `process.stdin`. Custom stdin streams, existing direct stdin listeners, redirected input, non-Windows systems, and native initialization failures continue through Ink's existing VT/Kitty stdin parser. The optional `koffi` dependency is loaded lazily on Windows and is never loaded on other platforms.
+
+```jsx
+render(<MyApp />, {
+	windowsConsoleInput: {mode: 'auto'},
+});
+```
+
+**windowsConsoleInput.mode**
+
+Type: `'auto' | 'enabled' | 'disabled'`\
+Default: `'auto'`
+
+- `'auto'`: Use native console records when eligible and no Kitty keyboard backend is configured; silently fall back to stdin if native input is unavailable.
+- `'enabled'`: Give native Windows input priority over Kitty keyboard input. If initialization or reading fails, Ink writes a warning and falls back to stdin.
+- `'disabled'`: Always use the existing stdin parser.
+
+Only one low-level reader owns the console input handle. In `auto` mode, an explicit `kittyKeyboard` configuration keeps ownership on Ink's stdin path; otherwise native Windows input owns the console from the beginning. Set `windowsConsoleInput.mode` to `'enabled'` to give native input priority and skip Kitty negotiation. This avoids switching from an active Node TTY read to `ReadConsoleInputW`, where the two readers could otherwise consume the same console queue. Treat `process.stdin` as single-owner: a second live Ink instance sharing it is prevented from starting a competing native reader and will not receive native input while the first owner remains active.
+
+If native initialization or a runtime read fails, Ink falls back to its existing stdin parser. A configured Kitty backend remains available when it owns stdin; when native input has priority, Kitty negotiation is intentionally skipped.
+
+With the native backend, `Shift+Enter` reaches `useInput` as `input === '\r'`, `key.return === true`, and `key.shift === true`. Injected Unicode from paste and IME input remains on the raw-text path, preserving bracketed paste handling.
 
 ###### kittyKeyboard
 

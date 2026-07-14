@@ -133,11 +133,12 @@ const isCtrlKey = (code: string) => {
 	].includes(code);
 };
 
-type ParsedKey = {
+export type ParsedKey = {
 	name: string;
 	ctrl: boolean;
 	meta: boolean;
 	shift: boolean;
+	altGr?: boolean;
 	sequence: string;
 	raw: string | undefined;
 	code?: string;
@@ -147,6 +148,7 @@ type ParsedKey = {
 	numLock?: boolean;
 	eventType?: 'press' | 'repeat' | 'release';
 	isKittyProtocol?: boolean;
+	isStructuredInput?: boolean;
 	text?: string;
 	// Whether this key represents printable text input.
 	// When false, the key is a control/function/modifier key that should not

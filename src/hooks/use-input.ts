@@ -1,5 +1,6 @@
 import {useEffect, useEffectEvent} from 'react';
-import parseKeypress, {nonAlphanumericKeys} from '../parse-keypress.js';
+import {getInputFromKeypress, type InternalInputEvent} from '../input-event.js';
+import parseKeypress from '../parse-keypress.js';
 import reconciler from '../reconciler.js';
 import {useStdinContext} from './use-stdin.js';
 
@@ -88,6 +89,13 @@ export type Key = {
 	meta: boolean;
 
 	/**
+	AltGr produced printable text on Windows.
+
+	Only available with native Windows console input.
+	*/
+	altGr?: boolean;
+
+	/**
 	Super key (Cmd on Mac, Win on Windows) was pressed.
 
 	Only available with kitty keyboard protocol.
@@ -104,21 +112,22 @@ export type Key = {
 	/**
 	Caps Lock is active.
 
-	Only available with kitty keyboard protocol.
+	Available with kitty keyboard protocol and native Windows console input.
 	*/
 	capsLock: boolean;
 
 	/**
 	Num Lock is active.
 
-	Only available with kitty keyboard protocol.
+	Available with kitty keyboard protocol and native Windows console input.
 	*/
 	numLock: boolean;
 
 	/**
 	Event type for key events.
 
-	Only available with kitty keyboard protocol.
+	Available with enhanced input backends such as the kitty keyboard protocol
+	and native Windows console input.
 	*/
 	eventType?: 'press' | 'repeat' | 'release';
 };
@@ -173,8 +182,9 @@ const useInput = (inputHandler: Handler, options: Options = {}) => {
 		};
 	}, [options.isActive, setRawMode]);
 
-	const handleData = useEffectEvent((data: string) => {
-		const keypress = parseKeypress(data);
+	const handleData = useEffectEvent((data: InternalInputEvent) => {
+		const keypress =
+			typeof data === 'string' ? parseKeypress(data) : data.keypress;
 
 		const key: Key = {
 			upArrow: keypress.name === 'up',
@@ -193,6 +203,7 @@ const useInput = (inputHandler: Handler, options: Options = {}) => {
 			backspace: keypress.name === 'backspace',
 			delete: keypress.name === 'delete',
 			meta: keypress.meta,
+			...(keypress.altGr ? {altGr: true} : {}),
 			// Kitty keyboard protocol modifiers
 			super: keypress.super ?? false,
 			hyper: keypress.hyper ?? false,
@@ -201,43 +212,14 @@ const useInput = (inputHandler: Handler, options: Options = {}) => {
 			eventType: keypress.eventType,
 		};
 
-		let input: string;
-		if (keypress.isKittyProtocol) {
-			// Use text-as-codepoints field for printable keys (needed when
-			// reportAllKeysAsEscapeCodes flag is enabled), suppress non-printable
-			if (keypress.isPrintable) {
-				input = keypress.text ?? keypress.name;
-			} else if (keypress.ctrl && keypress.name.length === 1) {
-				// Ctrl+letter via codepoint 1-26 form: not printable text, but
-				// the letter name must flow through so handlers (e.g. exitOnCtrlC
-				// checking `input === 'c' && key.ctrl`) still work.
-				input = keypress.name;
-			} else {
-				input = '';
-			}
-		} else if (keypress.ctrl) {
-			// Keypress.name is guaranteed non-undefined by parseKeypress,
-			// but guard defensively since a TypeError here would crash the
-			// entire Ink app (see https://github.com/vadimdemedes/ink/issues/901).
-			input = keypress.name ?? '';
-		} else {
-			input = keypress.sequence;
-		}
+		const input = getInputFromKeypress(keypress);
 
 		if (
 			!keypress.isKittyProtocol &&
-			nonAlphanumericKeys.includes(keypress.name)
+			!keypress.isStructuredInput &&
+			input.length === 1 &&
+			/[A-Z]/.test(input)
 		) {
-			input = '';
-		}
-
-		// Strip escape prefix from broken/incomplete sequences that
-		// parseKeypress did not fully resolve (e.g. a flushed "\u001B[").
-		if (input.startsWith('\u001B')) {
-			input = input.slice(1);
-		}
-
-		if (input.length === 1 && /[A-Z]/.test(input)) {
 			key.shift = true;
 		}
 

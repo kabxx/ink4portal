@@ -133,5 +133,8 @@
 			"--import=tsx"
 		]
 	},
-	"prettier": "@vdemedes/prettier-config"
+	"prettier": "@vdemedes/prettier-config",
+	"optionalDependencies": {
+		"koffi": "^3.0.2"
+	}
 }
