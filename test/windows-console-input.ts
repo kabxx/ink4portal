@@ -121,37 +121,6 @@ test('distinguishes Enter from Shift+Enter without changing input text', t => {
 	t.is(getInputFromKeypress(events[1]!.keypress), '\r');
 });
 
-test('tracks Shift when the Enter record omits its modifier state', t => {
-	const events = getKeyEvents(
-		decode([
-			{
-				virtualKeyCode: 0x10,
-				virtualScanCode: 0x2a,
-				controlKeyState: windowsConsoleControlKeyState.shift,
-			},
-			{
-				virtualKeyCode: 0x0d,
-				virtualScanCode: 0x1c,
-				unicodeCodeUnit: 0x0d,
-			},
-			{
-				keyDown: false,
-				virtualKeyCode: 0x10,
-				virtualScanCode: 0x2a,
-			},
-			{
-				virtualKeyCode: 0x0d,
-				virtualScanCode: 0x1c,
-				unicodeCodeUnit: 0x0d,
-			},
-		]),
-	);
-
-	t.is(events.length, 2);
-	t.true(events[0]!.keypress.shift);
-	t.false(events[1]!.keypress.shift);
-});
-
 test('delivers a structured Shift+Enter event through useInput', t => {
 	let emitter: ReturnType<typeof useStdinContext>['internal_eventEmitter'];
 	let received: {input: string; key: Key} | undefined;
@@ -287,6 +256,73 @@ test('normalizes Ctrl+letter shortcuts to their letter input', t => {
 	t.true(event!.keypress.ctrl);
 	t.false(event!.keypress.isPrintable);
 	t.is(getInputFromKeypress(event!.keypress), 'c');
+});
+
+test('does not inherit a held modifier onto terminal-injected text', t => {
+	const pasted =
+		'https://chat.deepseek.com/a/chat/s/b02ce7a1-3470-462c-ad04-6d19785d802b';
+	const pastedRecords = [...pasted].flatMap(character => {
+		const unicodeCodeUnit = character.codePointAt(0) ?? 0;
+		const virtualKeyCode =
+			unicodeCodeUnit >= 0x61 && unicodeCodeUnit <= 0x7a
+				? unicodeCodeUnit - 0x20
+				: 0xe7;
+		return [
+			{virtualKeyCode, virtualScanCode: 1, unicodeCodeUnit},
+			{
+				keyDown: false,
+				virtualKeyCode,
+				virtualScanCode: 1,
+				unicodeCodeUnit,
+			},
+		];
+	});
+	const events = getKeyEvents(
+		decode([
+			{
+				virtualKeyCode: 0x11,
+				virtualScanCode: 0x1d,
+				controlKeyState: windowsConsoleControlKeyState.leftControl,
+			},
+			...pastedRecords,
+			{
+				keyDown: false,
+				virtualKeyCode: 0x56,
+				virtualScanCode: 0x2f,
+				unicodeCodeUnit: 0x16,
+				controlKeyState: windowsConsoleControlKeyState.leftControl,
+			},
+			{
+				keyDown: false,
+				virtualKeyCode: 0x11,
+				virtualScanCode: 0x1d,
+			},
+			{
+				virtualKeyCode: 0x43,
+				virtualScanCode: 0x2e,
+				unicodeCodeUnit: 0x03,
+				controlKeyState: windowsConsoleControlKeyState.leftControl,
+			},
+			{
+				virtualKeyCode: 0x44,
+				virtualScanCode: 0x20,
+				unicodeCodeUnit: 0x04,
+				controlKeyState: windowsConsoleControlKeyState.leftControl,
+			},
+		]),
+	);
+	const pastedEvents = events.slice(0, pasted.length);
+
+	t.is(
+		pastedEvents.map(event => getInputFromKeypress(event.keypress)).join(''),
+		pasted,
+	);
+	t.true(pastedEvents.every(event => !event.keypress.ctrl));
+	const [controlC, controlD] = events.slice(pasted.length);
+	t.is(controlC?.keypress.name, 'c');
+	t.true(controlC?.keypress.ctrl);
+	t.is(controlD?.keypress.name, 'd');
+	t.true(controlD?.keypress.ctrl);
 });
 
 test('decodes modified arrows and function keys as non-printable keys', t => {

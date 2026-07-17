@@ -241,54 +241,6 @@ export const enrichModifiedEnterRecords = (
 	}
 };
 
-const getModifierControlKeyState = (record: WindowsKeyRecord): number => {
-	switch (record.virtualKeyCode) {
-		case virtualKey.shift:
-		case virtualKey.leftShift:
-		case virtualKey.rightShift: {
-			return windowsConsoleControlKeyState.shift;
-		}
-
-		case virtualKey.leftControl: {
-			return windowsConsoleControlKeyState.leftControl;
-		}
-
-		case virtualKey.rightControl: {
-			return windowsConsoleControlKeyState.rightControl;
-		}
-
-		case virtualKey.control: {
-			return hasFlag(
-				record.controlKeyState,
-				windowsConsoleControlKeyState.enhancedKey,
-			)
-				? windowsConsoleControlKeyState.rightControl
-				: windowsConsoleControlKeyState.leftControl;
-		}
-
-		case virtualKey.leftAlt: {
-			return windowsConsoleControlKeyState.leftAlt;
-		}
-
-		case virtualKey.rightAlt: {
-			return windowsConsoleControlKeyState.rightAlt;
-		}
-
-		case virtualKey.alt: {
-			return hasFlag(
-				record.controlKeyState,
-				windowsConsoleControlKeyState.enhancedKey,
-			)
-				? windowsConsoleControlKeyState.rightAlt
-				: windowsConsoleControlKeyState.leftAlt;
-		}
-
-		default: {
-			return 0;
-		}
-	}
-};
-
 const getModifiers = (controlKeyState: number) => ({
 	ctrl:
 		hasFlag(controlKeyState, windowsConsoleControlKeyState.leftControl) ||
@@ -511,7 +463,6 @@ export type WindowsInputRecordDecoder = {
 export const createWindowsInputRecordDecoder =
 	(): WindowsInputRecordDecoder => {
 		let pendingHighSurrogate: WindowsKeyRecord | undefined;
-		let pressedModifierState = 0;
 
 		return {
 			decode(buffer, recordCount) {
@@ -541,27 +492,10 @@ export const createWindowsInputRecordDecoder =
 						continue;
 					}
 
-					let record = readKeyRecord(view, offset);
-					const modifierState = getModifierControlKeyState(record);
-					if (modifierState !== 0) {
-						if (record.keyDown) {
-							// eslint-disable-next-line no-bitwise
-							pressedModifierState |= modifierState;
-						} else {
-							// eslint-disable-next-line no-bitwise
-							pressedModifierState &= ~modifierState;
-						}
-					}
-
-					if (pressedModifierState !== 0) {
-						record = {
-							...record,
-							// Some console hosts report modifiers only on their own key
-							// records instead of repeating them on the target key.
-							// eslint-disable-next-line no-bitwise
-							controlKeyState: record.controlKeyState | pressedModifierState,
-						};
-					}
+					// Win32 defines dwControlKeyState for this specific record. Treat it as
+					// authoritative: console hosts can inject text before the modifier key-up
+					// that follows the paste operation.
+					const record = readKeyRecord(view, offset);
 
 					const isAltCodeRelease =
 						!record.keyDown &&
@@ -605,7 +539,6 @@ export const createWindowsInputRecordDecoder =
 			},
 			reset() {
 				pendingHighSurrogate = undefined;
-				pressedModifierState = 0;
 			},
 		};
 	};

@@ -2782,7 +2782,7 @@ Only one low-level reader owns the console input handle. In `auto` mode, an expl
 
 If native initialization or a runtime read fails, Ink falls back to its existing stdin parser. A configured Kitty backend remains available when it owns stdin; when native input has priority, Kitty negotiation is intentionally skipped.
 
-With the native backend, `Shift+Enter` reaches `useInput` as `input === '\r'`, `key.return === true`, and `key.shift === true`. Injected Unicode from paste and IME input remains on the raw-text path, preserving bracketed paste handling.
+With the native backend, `Shift+Enter` reaches `useInput` as `input === '\r'`, `key.return === true`, and `key.shift === true`. Each `KEY_EVENT_RECORD`'s own control-key state is authoritative; separately observed modifier transitions are not merged into later text records. This prevents terminal-injected text from inheriting the modifier used to invoke the paste operation. Injected Unicode from paste and IME input remains on the raw-text path.
 
 ###### kittyKeyboard
 
