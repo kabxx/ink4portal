@@ -213,6 +213,24 @@ test('preserve SGR color sequences in text', t => {
 	t.is(stripAnsi(output), 'green normal');
 });
 
+test('normalize terminal control characters before rendering text', t => {
+	const output = renderText(
+		'A\tB\u000BC\u000CD\rE\u0085F\u2028G\u2029H\u0000\u0007\u0008',
+	);
+
+	t.is(output, 'A   B C D\nE\nF\nG\nH');
+});
+
+test('expand tabs across nested text nodes from the parent column', t => {
+	const output = renderToString(
+		<Text>
+			A<Text color="red">{'\tB'}</Text>
+		</Text>,
+	);
+
+	t.is(stripAnsi(output), 'A   B');
+});
+
 test('preserve OSC hyperlink sequences in text', t => {
 	const output = renderText(
 		'\u001B]8;;https://example.com\u0007link\u001B]8;;\u0007',
@@ -232,22 +250,31 @@ test('preserve OSC hyperlink sequences with ST terminator in text', t => {
 	t.is(stripAnsi(output), 'link');
 });
 
-test('preserve C1 OSC sequences in text', t => {
+test('canonicalize C1 OSC sequences in text', t => {
 	const input = '\u009D8;;https://example.com\u0007link\u009D8;;\u0007';
 	const output = renderText(input);
 
-	t.true(output.includes('\u009D8;;https://example.com'));
-	t.true(output.includes('\u009D8;;\u0007'));
-	t.is(output, input);
+	t.true(output.includes('\u001B]8;;https://example.com'));
+	t.false(output.includes('\u009D'));
+	t.is(stripAnsi(output), 'link');
 });
 
-test('preserve C1 OSC hyperlink sequences with ST terminator in text', t => {
+test('canonicalize C1 OSC hyperlink sequences with ST terminator in text', t => {
 	const input = '\u009D8;;https://example.com\u001B\\link\u009D8;;\u001B\\';
 	const output = renderText(input);
 
-	t.true(output.includes('\u009D8;;https://example.com'));
+	t.true(output.includes('\u001B]8;;https://example.com'));
 	t.true(output.includes('\u001B\\'));
-	t.is(output, input);
+	t.false(output.includes('\u009D'));
+	t.is(stripAnsi(output), 'link');
+});
+
+test('strip terminal title and clipboard OSC sequences from text', t => {
+	const output = renderText(
+		'A\u001B]0;window title\u0007B\u001B]52;c;Y2xpcGJvYXJk\u001B\\C',
+	);
+
+	t.is(output, 'ABC');
 });
 
 test('preserve SGR sequences with colon parameters', t => {
@@ -426,9 +453,9 @@ test('strip standalone ST bytes from text output', t => {
 test('strip standalone C1 control characters from text output', t => {
 	const output = renderText('A\u0085B\u008EC');
 
-	t.false(output.includes('\u0085'));
+	t.true(output.includes('\n'));
 	t.false(output.includes('\u008E'));
-	t.is(stripAnsi(output), 'ABC');
+	t.is(stripAnsi(output), 'A\nBC');
 });
 
 // Concurrent mode tests
