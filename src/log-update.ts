@@ -1,6 +1,7 @@
 import {type Writable} from 'node:stream';
 import ansiEscapes from 'ansi-escapes';
 import cliCursor from 'cli-cursor';
+import stringWidth from 'string-width';
 import {
 	type CursorPosition,
 	cursorPositionChanged,
@@ -16,11 +17,59 @@ export type LogUpdate = {
 	clear: () => void;
 	done: () => void;
 	reset: () => void;
-	sync: (str: string) => void;
+	sync: (str: string, options?: {stabilizeRightMargin?: boolean}) => void;
 	setCursorPosition: (position: CursorPosition | undefined) => void;
 	isCursorDirty: () => boolean;
 	willRender: (str: string) => boolean;
 	(str: string): boolean;
+};
+
+type LogUpdateOptions = {
+	showCursor?: boolean;
+	incremental?: boolean;
+	getTerminalWidth?: () => number;
+};
+
+type SyncOptions = {stabilizeRightMargin?: boolean};
+
+// A full-width final row leaves Windows consoles in wrap-pending. Returning to
+// column zero keeps the same pixels while preventing the next frame from scrolling.
+const rightMarginReset = (
+	output: string,
+	terminalWidth: number | undefined,
+): string => {
+	if (
+		terminalWidth === undefined ||
+		terminalWidth <= 0 ||
+		output === '' ||
+		output.endsWith('\n') ||
+		output.endsWith('\r')
+	) {
+		return '';
+	}
+
+	const lastLine = output.slice(output.lastIndexOf('\n') + 1);
+	const width = stringWidth(lastLine);
+	return width >= terminalWidth && width % terminalWidth === 0 ? '\r' : '';
+};
+
+export const stabilizeRightMargin = (
+	output: string,
+	terminalWidth: number | undefined,
+): string => `${output}${rightMarginReset(output, terminalWidth)}`;
+
+const cursorAnchorLine = (output: string, visibleCount: number): number =>
+	output.endsWith('\n') ? visibleCount : Math.max(0, visibleCount - 1);
+
+const buildOutputSuffix = (
+	output: string,
+	visibleCount: number,
+	cursorPosition: CursorPosition | undefined,
+	getTerminalWidth: (() => number) | undefined,
+): string => {
+	const reset = rightMarginReset(output, getTerminalWidth?.());
+	const cursorAnchor = cursorAnchorLine(output, visibleCount);
+	return reset + buildCursorSuffix(cursorAnchor, cursorPosition);
 };
 
 // Count visible lines in a string, ignoring the trailing empty element
@@ -30,7 +79,7 @@ const visibleLineCount = (lines: string[], str: string): number =>
 
 const createStandard = (
 	stream: Writable,
-	{showCursor = false} = {},
+	{showCursor = false, getTerminalWidth}: LogUpdateOptions = {},
 ): LogUpdate => {
 	let previousLineCount = 0;
 	let previousOutput = '';
@@ -73,7 +122,12 @@ const createStandard = (
 
 		const lines = str.split('\n');
 		const visibleCount = visibleLineCount(lines, str);
-		const cursorSuffix = buildCursorSuffix(visibleCount, activeCursor);
+		const outputSuffix = buildOutputSuffix(
+			str,
+			visibleCount,
+			activeCursor,
+			getTerminalWidth,
+		);
 
 		if (str === previousOutput && cursorChanged) {
 			stream.write(
@@ -81,7 +135,7 @@ const createStandard = (
 					cursorWasShown,
 					previousLineCount,
 					previousCursorPosition,
-					visibleLineCount: visibleCount,
+					visibleLineCount: cursorAnchorLine(str, visibleCount),
 					cursorPosition: activeCursor,
 				}),
 			);
@@ -96,7 +150,7 @@ const createStandard = (
 				returnPrefix +
 					ansiEscapes.eraseLines(previousLineCount) +
 					str +
-					cursorSuffix,
+					outputSuffix,
 			);
 			previousLineCount = lines.length;
 		}
@@ -138,7 +192,7 @@ const createStandard = (
 		cursorWasShown = false;
 	};
 
-	render.sync = (str: string) => {
+	render.sync = (str: string, options: SyncOptions = {}) => {
 		const activeCursor = cursorDirty ? cursorPosition : undefined;
 		cursorDirty = false;
 
@@ -150,10 +204,12 @@ const createStandard = (
 			stream.write(hideCursorEscape);
 		}
 
-		if (activeCursor) {
-			stream.write(
-				buildCursorSuffix(visibleLineCount(lines, str), activeCursor),
-			);
+		const visibleCount = visibleLineCount(lines, str);
+		const outputSuffix = options.stabilizeRightMargin
+			? buildOutputSuffix(str, visibleCount, activeCursor, getTerminalWidth)
+			: buildCursorSuffix(cursorAnchorLine(str, visibleCount), activeCursor);
+		if (outputSuffix !== '') {
+			stream.write(outputSuffix);
 		}
 
 		previousCursorPosition = activeCursor ? {...activeCursor} : undefined;
@@ -173,7 +229,7 @@ const createStandard = (
 
 const createIncremental = (
 	stream: Writable,
-	{showCursor = false} = {},
+	{showCursor = false, getTerminalWidth}: LogUpdateOptions = {},
 ): LogUpdate => {
 	let previousLines: string[] = [];
 	let previousOutput = '';
@@ -224,7 +280,7 @@ const createIncremental = (
 					cursorWasShown,
 					previousLineCount: previousLines.length,
 					previousCursorPosition,
-					visibleLineCount: visibleCount,
+					visibleLineCount: cursorAnchorLine(str, visibleCount),
 					cursorPosition: activeCursor,
 				}),
 			);
@@ -240,12 +296,17 @@ const createIncremental = (
 		);
 
 		if (str === '\n' || previousOutput.length === 0) {
-			const cursorSuffix = buildCursorSuffix(visibleCount, activeCursor);
+			const outputSuffix = buildOutputSuffix(
+				str,
+				visibleCount,
+				activeCursor,
+				getTerminalWidth,
+			);
 			stream.write(
 				returnPrefix +
 					ansiEscapes.eraseLines(previousLines.length) +
 					str +
-					cursorSuffix,
+					outputSuffix,
 			);
 			cursorWasShown = activeCursor !== undefined;
 			previousCursorPosition = activeCursor ? {...activeCursor} : undefined;
@@ -297,8 +358,9 @@ const createIncremental = (
 			);
 		}
 
-		const cursorSuffix = buildCursorSuffix(visibleCount, activeCursor);
-		buffer.push(cursorSuffix);
+		buffer.push(
+			buildOutputSuffix(str, visibleCount, activeCursor, getTerminalWidth),
+		);
 
 		stream.write(buffer.join(''));
 
@@ -341,7 +403,7 @@ const createIncremental = (
 		cursorWasShown = false;
 	};
 
-	render.sync = (str: string) => {
+	render.sync = (str: string, options: SyncOptions = {}) => {
 		const activeCursor = cursorDirty ? cursorPosition : undefined;
 		cursorDirty = false;
 
@@ -353,10 +415,12 @@ const createIncremental = (
 			stream.write(hideCursorEscape);
 		}
 
-		if (activeCursor) {
-			stream.write(
-				buildCursorSuffix(visibleLineCount(lines, str), activeCursor),
-			);
+		const visibleCount = visibleLineCount(lines, str);
+		const outputSuffix = options.stabilizeRightMargin
+			? buildOutputSuffix(str, visibleCount, activeCursor, getTerminalWidth)
+			: buildCursorSuffix(cursorAnchorLine(str, visibleCount), activeCursor);
+		if (outputSuffix !== '') {
+			stream.write(outputSuffix);
 		}
 
 		previousCursorPosition = activeCursor ? {...activeCursor} : undefined;
@@ -376,13 +440,17 @@ const createIncremental = (
 
 const create = (
 	stream: Writable,
-	{showCursor = false, incremental = false} = {},
+	{
+		showCursor = false,
+		incremental = false,
+		getTerminalWidth,
+	}: LogUpdateOptions = {},
 ): LogUpdate => {
 	if (incremental) {
-		return createIncremental(stream, {showCursor});
+		return createIncremental(stream, {showCursor, getTerminalWidth});
 	}
 
-	return createStandard(stream, {showCursor});
+	return createStandard(stream, {showCursor, getTerminalWidth});
 };
 
 const logUpdate = {create};
