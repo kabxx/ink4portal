@@ -7,7 +7,7 @@ import sanitizeAnsi from './sanitize-ansi.js';
 //
 // Also, this is necessary for libraries like ink-link (https://github.com/sindresorhus/ink-link),
 // which need to wrap all children at once, instead of wrapping 3 text nodes separately.
-const squashTextNodes = (node: DOMElement): string => {
+const squashTextNodes = (node: DOMElement, sanitize = true): string => {
 	let text = '';
 
 	for (let index = 0; index < node.childNodes.length; index++) {
@@ -26,7 +26,7 @@ const squashTextNodes = (node: DOMElement): string => {
 				childNode.nodeName === 'ink-text' ||
 				childNode.nodeName === 'ink-virtual-text'
 			) {
-				nodeText = squashTextNodes(childNode);
+				nodeText = squashTextNodes(childNode, false);
 			}
 
 			// Since these text nodes are being concatenated, `Output` instance won't be able to
@@ -42,7 +42,7 @@ const squashTextNodes = (node: DOMElement): string => {
 		text += nodeText;
 	}
 
-	return sanitizeAnsi(text);
+	return sanitize ? sanitizeAnsi(text) : text;
 };
 
 export default squashTextNodes;

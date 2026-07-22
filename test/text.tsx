@@ -221,6 +221,16 @@ test('normalize terminal control characters before rendering text', t => {
 	t.is(output, 'A   B C D\nE\nF\nG\nH');
 });
 
+test('expand tabs across nested text nodes from the parent column', t => {
+	const output = renderToString(
+		<Text>
+			A<Text color="red">{'\tB'}</Text>
+		</Text>,
+	);
+
+	t.is(stripAnsi(output), 'A   B');
+});
+
 test('preserve OSC hyperlink sequences in text', t => {
 	const output = renderText(
 		'\u001B]8;;https://example.com\u0007link\u001B]8;;\u0007',

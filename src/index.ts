@@ -6,6 +6,8 @@ export {
 	default as sanitizeTerminalText,
 	stripAnsiSequences,
 } from './sanitize-ansi.js';
+export {tokenizeAnsi} from './ansi-tokenizer.js';
+export type {AnsiToken} from './ansi-tokenizer.js';
 export type {Props as BoxProps} from './components/Box.js';
 export {default as Box} from './components/Box.js';
 export type {Props as TextProps} from './components/Text.js';
