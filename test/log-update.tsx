@@ -1,7 +1,90 @@
 import test from 'ava';
 import ansiEscapes from 'ansi-escapes';
-import logUpdate from '../src/log-update.js';
+import logUpdate, {stabilizeRightMargin} from '../src/log-update.js';
 import createStdout from './helpers/create-stdout.js';
+
+test('stabilizeRightMargin clears wrap-pending only at an exact right margin', t => {
+	t.is(stabilizeRightMargin('12345', 5), '12345\r');
+	t.is(
+		stabilizeRightMargin('\u001B[31m12345\u001B[39m', 5),
+		'\u001B[31m12345\u001B[39m\r',
+	);
+	t.is(stabilizeRightMargin('界界a', 5), '界界a\r');
+	t.is(stabilizeRightMargin('1234', 5), '1234');
+	t.is(stabilizeRightMargin('12345\n', 5), '12345\n');
+	t.is(stabilizeRightMargin('12345\r', 5), '12345\r');
+	t.is(stabilizeRightMargin('12345', undefined), '12345');
+});
+
+for (const incremental of [false, true]) {
+	test(`${incremental ? 'incremental' : 'standard'} rendering clears right-margin wrap-pending after the physical frame`, t => {
+		const stdout = createStdout();
+		const render = logUpdate.create(stdout, {
+			showCursor: true,
+			incremental,
+			getTerminalWidth: () => 5,
+		});
+
+		render('12345');
+		t.true(stdout.get().endsWith('12345\r'));
+
+		render('12X45');
+		const update = stdout.get();
+		t.true(update.endsWith('\r'));
+		t.true(update.indexOf(ansiEscapes.eraseEndLine) < update.lastIndexOf('\r'));
+	});
+}
+
+test('right-margin stabilization is disabled when no terminal width is provided', t => {
+	const stdout = createStdout();
+	const render = logUpdate.create(stdout, {showCursor: true});
+
+	render('12345');
+	t.false(stdout.get().endsWith('\r'));
+});
+
+for (const incremental of [false, true]) {
+	test(`${incremental ? 'incremental' : 'standard'} right-margin reset anchors the visible cursor on the final row`, t => {
+		const stdout = createStdout();
+		const render = logUpdate.create(stdout, {
+			showCursor: true,
+			incremental,
+			getTerminalWidth: () => 5,
+		});
+		render.setCursorPosition({x: 2, y: 0});
+
+		render('12345');
+
+		const output = stdout.get();
+		t.true(output.includes('12345\r'));
+		t.false(output.includes(ansiEscapes.cursorUp(1)));
+		t.true(output.endsWith(ansiEscapes.cursorTo(2) + showCursorEscape));
+	});
+}
+
+for (const incremental of [false, true]) {
+	test(`${incremental ? 'incremental' : 'standard'} cursor-only updates stay on a no-newline final row`, t => {
+		const stdout = createStdout();
+		const render = logUpdate.create(stdout, {
+			showCursor: true,
+			incremental,
+			getTerminalWidth: () => 5,
+		});
+
+		render('12345');
+		render.setCursorPosition({x: 2, y: 0});
+		render('12345');
+		t.false(stdout.get().includes(ansiEscapes.cursorUp(1)));
+
+		render.setCursorPosition({x: 3, y: 0});
+		render('12345');
+		t.false(stdout.get().includes(ansiEscapes.cursorUp(1)));
+
+		render.setCursorPosition(undefined);
+		render('12345');
+		t.false(stdout.get().includes(ansiEscapes.cursorUp(1)));
+	});
+}
 
 test('standard rendering - renders and updates output', t => {
 	const stdout = createStdout();

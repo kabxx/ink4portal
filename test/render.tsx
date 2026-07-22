@@ -1,9 +1,11 @@
 import process from 'node:process';
 import vm from 'node:vm';
 import {spawn as spawnProcess} from 'node:child_process';
+import {mkdtemp, readFile, rm} from 'node:fs/promises';
 import {PassThrough, Writable} from 'node:stream';
 import url from 'node:url';
 import * as path from 'node:path';
+import os from 'node:os';
 import {createRequire} from 'node:module';
 import FakeTimers from '@sinonjs/fake-timers';
 import {stub} from 'sinon';
@@ -561,6 +563,140 @@ test.serial(
 		);
 	},
 );
+
+test.serial(
+	'Windows removes a full-width live frame when its result moves into Static',
+	async t => {
+		if (process.platform !== 'win32') {
+			t.pass();
+			return;
+		}
+
+		const columns = 124;
+		const rows = 40;
+		const directory = await mkdtemp(path.join(os.tmpdir(), 'ink-static-live-'));
+		const snapshotPath = path.join(directory, 'screen.txt');
+		const fixturePath = path.join(
+			__dirname,
+			'./fixtures/windows-static-live-transition.tsx',
+		);
+		const fixture = spawn(
+			process.execPath,
+			[
+				'--import=tsx',
+				fixturePath,
+				snapshotPath,
+				String(columns),
+				String(rows),
+			],
+			{
+				name: 'xterm-color',
+				cols: columns,
+				rows,
+				cwd: __dirname,
+				env: {
+					...process.env,
+					// eslint-disable-next-line @typescript-eslint/naming-convention
+					NODE_NO_WARNINGS: '1',
+				},
+			},
+		);
+
+		try {
+			await new Promise<void>((resolve, reject) => {
+				fixture.onExit(({exitCode}) => {
+					if (exitCode === 0) {
+						resolve();
+						return;
+					}
+
+					reject(new Error(`Fixture exited with code ${exitCode}`));
+				});
+			});
+
+			const snapshot = JSON.parse(await readFile(snapshotPath, 'utf8')) as {
+				screen: string;
+				cursor: {X: number; Y: number};
+			};
+			const {screen} = snapshot;
+			t.false(screen.includes('LIVE-'));
+			t.is(countOccurrences(screen, 'FINAL-'), 2);
+			t.true(screen.includes('INPUT-BOTTOM'));
+			t.is(snapshot.cursor.X, 0);
+		} finally {
+			fixture.kill();
+			await rm(directory, {recursive: true, force: true});
+		}
+	},
+);
+
+test('Windows full-clear output also resets a full-width right margin', t => {
+	if (process.platform !== 'win32') {
+		t.pass();
+		return;
+	}
+
+	const stdout = createStdout();
+	stdout.columns = 5;
+	stdout.rows = 1;
+	const writes = captureWrites(stdout);
+	const {unmount} = render(<Text>12345</Text>, {
+		stdout,
+		reserveTrailingLine: false,
+	});
+
+	try {
+		t.true(writes.join('').includes(`${ansiEscapes.clearTerminal}12345\r`));
+	} finally {
+		unmount();
+	}
+});
+
+test.serial('Windows keeps useCursor on a stabilized full-width row', async t => {
+	if (process.platform !== 'win32') {
+		t.pass();
+		return;
+	}
+
+	const directory = await mkdtemp(path.join(os.tmpdir(), 'ink-full-cursor-'));
+	const snapshotPath = path.join(directory, 'cursor.json');
+	const fixture = spawn(
+		process.execPath,
+		[
+			'--import=tsx',
+			path.join(__dirname, './fixtures/windows-full-width-cursor.tsx'),
+			snapshotPath,
+		],
+		{
+			name: 'xterm-color',
+			cols: 5,
+			rows: 3,
+			cwd: __dirname,
+			env: {
+				...process.env,
+				// eslint-disable-next-line @typescript-eslint/naming-convention
+				NODE_NO_WARNINGS: '1',
+			},
+		},
+	);
+
+	try {
+		await new Promise<void>((resolve, reject) => {
+			fixture.onExit(({exitCode}) => {
+				if (exitCode === 0) resolve();
+				else reject(new Error(`Fixture exited with code ${exitCode}`));
+			});
+		});
+		const cursor = JSON.parse(await readFile(snapshotPath, 'utf8')) as {
+			X: number;
+			Y: number;
+		};
+		t.deepEqual(cursor, {X: 2, Y: 0});
+	} finally {
+		fixture.kill();
+		await rm(directory, {recursive: true, force: true});
+	}
+});
 
 test.serial(
 	'#450: initial overflowing frame should not clear terminal',

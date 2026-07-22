@@ -15,7 +15,11 @@ import reconciler from './reconciler.js';
 import render from './renderer.js';
 import * as dom from './dom.js';
 import {hideCursorEscape, showCursorEscape} from './cursor-helpers.js';
-import logUpdate, {type LogUpdate, type CursorPosition} from './log-update.js';
+import logUpdate, {
+	type LogUpdate,
+	type CursorPosition,
+	stabilizeRightMargin,
+} from './log-update.js';
 import {bsu, esu, shouldSynchronize} from './write-synchronized.js';
 import instances from './instances.js';
 import App from './components/App.js';
@@ -415,6 +419,9 @@ export default class Ink {
 		this.rootNode.onStaticChange = this.handleStaticChange;
 		this.log = logUpdate.create(options.stdout, {
 			incremental: options.incrementalRendering,
+			getTerminalWidth: isWindowsConsole
+				? () => getWindowSize(this.options.stdout).columns
+				: undefined,
 		});
 		this.cursorPosition = undefined;
 		this.throttledLog = unthrottled
@@ -665,16 +672,19 @@ export default class Ink {
 				trim: false,
 				hard: true,
 			});
+			const physicalWrappedOutput = isWindowsConsole
+				? stabilizeRightMargin(wrappedOutput, terminalWidth)
+				: wrappedOutput;
 
 			// If we haven't erased yet, do it now.
 			if (hasStaticOutput) {
-				this.options.stdout.write(wrappedOutput);
+				this.options.stdout.write(physicalWrappedOutput);
 			} else {
 				const erase =
 					this.lastOutputHeight > 0
 						? ansiEscapes.eraseLines(this.lastOutputHeight)
 						: '';
-				this.options.stdout.write(erase + wrappedOutput);
+				this.options.stdout.write(erase + physicalWrappedOutput);
 			}
 
 			this.lastOutput = output;
@@ -1160,7 +1170,8 @@ export default class Ink {
 
 		// Detect fullscreen: output fills or exceeds terminal height.
 		// Only apply when writing to a real TTY — piped output always gets trailing newlines.
-		const viewportRows = isTty ? getWindowSize(this.options.stdout).rows : 24;
+		const terminalSize = isTty ? getWindowSize(this.options.stdout) : undefined;
+		const viewportRows = terminalSize?.rows ?? 24;
 		const isFullscreen = isTty && outputHeight >= viewportRows;
 		const outputToRender =
 			isFullscreen || !this.options.reserveTrailingLine
@@ -1187,7 +1198,9 @@ export default class Ink {
 			this.lastOutput = output;
 			this.lastOutputToRender = outputToRender;
 			this.lastOutputHeight = outputHeight;
-			this.log.sync(outputToRender);
+			this.log.sync(outputToRender, {
+				stabilizeRightMargin: isWindowsConsole,
+			});
 
 			if (sync) {
 				this.options.stdout.write(esu);
