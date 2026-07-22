@@ -1,9 +1,32 @@
 import test from 'ava';
 import stripAnsi from 'strip-ansi';
-import sanitizeAnsi from '../src/sanitize-ansi.js';
+import stringWidth from 'string-width';
+import sanitizeAnsi, {stripAnsiSequences} from '../src/sanitize-ansi.js';
 
 test('preserve plain text', t => {
 	t.is(sanitizeAnsi('hello'), 'hello');
+});
+
+test('normalize terminal line separators', t => {
+	t.is(sanitizeAnsi('A\r\nB\rC\u0085D\u2028E\u2029F'), 'A\nB\nC\nD\nE\nF');
+});
+
+test('normalize layout-active whitespace', t => {
+	t.is(sanitizeAnsi('A\tB\u000BC\u000CD'), 'A   B C D');
+});
+
+test('strip unsupported C0 and DEL control characters', t => {
+	t.is(
+		sanitizeAnsi('A\u0000\u0001\u0007\u0008\u000E\u001A\u001C\u001FB\u007FC'),
+		'ABC',
+	);
+});
+
+test('preserve Unicode spacing and zero-width formatting characters', t => {
+	const input =
+		'A\u00A0\u2002\u2003\u2009\u3000\u200B\u200C\u200D\u2060\uFEFFB';
+
+	t.is(sanitizeAnsi(input), input);
 });
 
 test('preserve SGR sequences', t => {
@@ -22,37 +45,59 @@ test('preserve OSC hyperlinks', t => {
 	t.is(stripAnsi(output), 'link');
 });
 
+test('preserve BEL-terminated OSC hyperlinks', t => {
+	const input = '\u001B]8;;https://example.com\u0007link\u001B]8;;\u0007';
+
+	t.is(sanitizeAnsi(input), input);
+});
+
 test('preserve OSC hyperlinks terminated by C1 ST', t => {
 	const output = sanitizeAnsi(
 		'\u001B]8;;https://example.com\u009Clink\u001B]8;;\u009C',
 	);
 
-	t.true(output.includes('\u001B]8;;https://example.com\u009C'));
+	t.true(output.includes('\u001B]8;;https://example.com\u001B\\'));
 	t.is(stripAnsi(output), 'link');
 });
 
-test('preserve C1 OSC hyperlinks terminated by C1 ST', t => {
+test('canonicalize C1 OSC hyperlinks terminated by C1 ST', t => {
 	const input = '\u009D8;;https://example.com\u009Clink\u009D8;;\u009C';
 	const output = sanitizeAnsi(input);
 
-	t.true(output.includes('\u009D8;;https://example.com\u009C'));
-	t.is(output, input);
+	t.is(output, '\u001B]8;;https://example.com\u001B\\link\u001B]8;;\u001B\\');
+	t.is(stringWidth(output), 4);
 });
 
-test('preserve C1 OSC hyperlinks terminated by ESC ST', t => {
+test('canonicalize C1 OSC hyperlinks terminated by ESC ST', t => {
 	const input = '\u009D8;;https://example.com\u001B\\link\u009D8;;\u001B\\';
 	const output = sanitizeAnsi(input);
 
-	t.true(output.includes('\u009D8;;https://example.com\u001B\\'));
-	t.is(output, input);
+	t.is(output, '\u001B]8;;https://example.com\u001B\\link\u001B]8;;\u001B\\');
 });
 
-test('preserve C1 OSC hyperlinks terminated by BEL', t => {
+test('canonicalize C1 OSC hyperlinks terminated by BEL', t => {
 	const input = '\u009D8;;https://example.com\u0007link\u009D8;;\u0007';
 	const output = sanitizeAnsi(input);
 
-	t.true(output.includes('\u009D8;;https://example.com\u0007'));
-	t.is(output, input);
+	t.is(output, '\u001B]8;;https://example.com\u001B\\link\u001B]8;;\u001B\\');
+});
+
+test('strip non-hyperlink OSC sequences', t => {
+	const output = sanitizeAnsi(
+		'A\u001B]0;window title\u0007B\u001B]52;c;Y2xpcGJvYXJk\u001B\\C',
+	);
+
+	t.is(output, 'ABC');
+});
+
+test('strip OSC hyperlinks with control characters in their payload', t => {
+	const output = sanitizeAnsi(
+		'A\u001B]8;;https://exa\tmple.com\u0007link\u001B]8;;\u0007B',
+	);
+
+	t.false(output.includes('https://exa'));
+	t.false(output.includes('\t'));
+	t.is(stripAnsi(output), 'AlinkB');
 });
 
 test('strip non-SGR CSI sequences as complete units', t => {
@@ -71,11 +116,20 @@ test('strip C1 non-SGR CSI sequences as complete units', t => {
 	t.is(stripAnsi(output), 'ABC');
 });
 
-test('preserve C1 SGR CSI sequences', t => {
+test('canonicalize C1 SGR CSI sequences', t => {
 	const output = sanitizeAnsi('A\u009B31mgreen\u009B0mB');
 
-	t.true(output.includes('\u009B31m'));
+	t.true(output.includes('\u001B[31m'));
+	t.false(output.includes('\u009B'));
 	t.is(stripAnsi(output), 'AgreenB');
+});
+
+test('strip ANSI sequences with the shared tokenizer', t => {
+	const sanitized = sanitizeAnsi(
+		'A\u009B31mred\u009B0m\u009D8;;https://example.com\u009Clink\u009D8;;\u009CB',
+	);
+
+	t.is(stripAnsiSequences(sanitized), 'AredlinkB');
 });
 
 test('strip private-parameter m-sequences that are not SGR', t => {
@@ -218,7 +272,7 @@ test('strip standalone ST bytes', t => {
 test('strip standalone C1 control characters', t => {
 	const output = sanitizeAnsi('A\u0085B\u008EC');
 
-	t.false(output.includes('\u0085'));
+	t.true(output.includes('\n'));
 	t.false(output.includes('\u008E'));
-	t.is(stripAnsi(output), 'ABC');
+	t.is(stripAnsi(output), 'A\nBC');
 });
