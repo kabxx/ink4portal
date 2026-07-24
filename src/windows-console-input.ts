@@ -93,6 +93,15 @@ export type WindowsConsoleResizeEvent = {
 export type WindowsConsoleInputEvent =
 	string | InputKeyEvent | WindowsConsoleResizeEvent;
 
+export const emitWindowsConsoleResize = (
+	stdout: NodeJS.WriteStream,
+	event: WindowsConsoleResizeEvent,
+): void => {
+	stdout.columns = event.columns;
+	stdout.rows = event.rows;
+	stdout.emit('resize');
+};
+
 type WindowsKeyRecord = {
 	readonly keyDown: boolean;
 	readonly repeatCount: number;

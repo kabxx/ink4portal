@@ -8,6 +8,7 @@ import {useStdinContext} from '../src/hooks/use-stdin.js';
 import {
 	createWindowsConsoleInput,
 	createWindowsInputRecordDecoder,
+	emitWindowsConsoleResize,
 	enrichModifiedEnterRecords,
 	getWindowsRawInputMode,
 	shouldUseWindowsConsoleInput,
@@ -399,6 +400,23 @@ test('preserves window resize records for Ink resize handling', t => {
 	t.deepEqual(decode([{eventType: 0x4, columns: 120, rows: 40}]), [
 		{type: 'resize', columns: 120, rows: 40},
 	]);
+});
+
+test('updates stdout dimensions before emitting a native Windows resize', t => {
+	const stdout = createStdout(80);
+	stdout.rows = 24;
+	let observedSize: {columns: number; rows: number} | undefined;
+	stdout.on('resize', () => {
+		observedSize = {columns: stdout.columns, rows: stdout.rows};
+	});
+
+	emitWindowsConsoleResize(stdout, {
+		type: 'resize',
+		columns: 120,
+		rows: 40,
+	});
+
+	t.deepEqual(observedSize, {columns: 120, rows: 40});
 });
 
 test('assembles UTF-16 surrogate pairs across native reads', t => {
