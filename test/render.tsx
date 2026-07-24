@@ -699,6 +699,66 @@ test.serial('Windows keeps useCursor on a stabilized full-width row', async t =>
 });
 
 test.serial(
+	'Windows preserves full-width borders during incremental updates',
+	async t => {
+		if (process.platform !== 'win32') {
+			t.pass();
+			return;
+		}
+
+		const columns = 24;
+		const rows = 8;
+		const directory = await mkdtemp(
+			path.join(os.tmpdir(), 'ink-incremental-full-width-'),
+		);
+		const snapshotPath = path.join(directory, 'screen.txt');
+		const fixture = spawn(
+			process.execPath,
+			[
+				'--import=tsx',
+				path.join(__dirname, './fixtures/windows-incremental-full-width.tsx'),
+				snapshotPath,
+				String(columns),
+				String(rows),
+			],
+			{
+				name: 'xterm-color',
+				cols: columns,
+				rows,
+				cwd: __dirname,
+				env: {
+					...process.env,
+					// eslint-disable-next-line @typescript-eslint/naming-convention
+					NODE_NO_WARNINGS: '1',
+				},
+			},
+		);
+
+		try {
+			await new Promise<void>((resolve, reject) => {
+				fixture.onExit(({exitCode}) => {
+					if (exitCode === 0) resolve();
+					else reject(new Error(`Fixture exited with code ${exitCode}`));
+				});
+			});
+
+			const screen = await readFile(snapshotPath, 'utf8');
+			const lines = Array.from({length: rows}, (_, index) =>
+				screen.slice(index * columns, (index + 1) * columns),
+			);
+			const bodyIndex = lines.findIndex(line => line.includes('STREAM-4'));
+			t.true(bodyIndex >= 0);
+			t.is(lines[bodyIndex]?.at(-1), '│');
+			t.true(lines[bodyIndex + 1]?.startsWith('└') ?? false);
+			t.true(lines[bodyIndex + 2]?.startsWith('INPUT') ?? false);
+		} finally {
+			fixture.kill();
+			await rm(directory, {recursive: true, force: true});
+		}
+	},
+);
+
+test.serial(
 	'#450: initial overflowing frame should not clear terminal',
 	async t => {
 		const renderedMarker = '__INITIAL_OVERFLOW_FRAME_RENDERED__';

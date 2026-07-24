@@ -348,10 +348,14 @@ const createIncremental = (
 				continue;
 			}
 
+			const line = nextLines[i]!;
+			const fillsTerminalWidth =
+				rightMarginReset(line, getTerminalWidth?.()) !== '';
+
 			buffer.push(
 				ansiEscapes.cursorTo(0) +
-					nextLines[i] +
-					ansiEscapes.eraseEndLine +
+					line +
+					(fillsTerminalWidth ? '' : ansiEscapes.eraseEndLine) +
 					// Don't append newline after the last line when the input
 					// has no trailing newline (fullscreen mode).
 					(isLastLine && !hasTrailingNewline ? '' : '\n'),

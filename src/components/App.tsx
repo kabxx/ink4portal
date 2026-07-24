@@ -15,6 +15,7 @@ import {createInputParser} from '../input-parser.js';
 import {getInputFromKeypress, type InternalInputEvent} from '../input-event.js';
 import {
 	createWindowsConsoleInput,
+	emitWindowsConsoleResize,
 	shouldUseWindowsConsoleInput,
 	type WindowsConsoleInputBackend,
 	type WindowsConsoleInputEvent,
@@ -435,7 +436,7 @@ function App({
 			}
 
 			if (event.type === 'resize') {
-				stdout.emit('resize');
+				emitWindowsConsoleResize(stdout, event);
 				return;
 			}
 

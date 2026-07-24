@@ -159,6 +159,23 @@ test('incremental rendering - surgical updates', t => {
 	t.false(secondCall.includes('Line 3')); // Doesn't rewrite unchanged
 });
 
+test('incremental rendering safely advances after updating a full-width line', t => {
+	const stdout = createStdout();
+	const render = logUpdate.create(stdout, {
+		showCursor: true,
+		incremental: true,
+		getTerminalWidth: () => 5,
+	});
+
+	render('12345\nabcde\n');
+	render('12X45\nabcde\n');
+
+	const update = (stdout.write as any).secondCall.args[0] as string;
+	t.true(update.includes('12X45\n'));
+	t.false(update.includes(`12X45${ansiEscapes.eraseEndLine}`));
+	t.false(update.includes('12X45\r\n'));
+});
+
 test('incremental rendering - same-height update rewinds cursor to top with trailing newline', t => {
 	const stdout = createStdout();
 	const render = logUpdate.create(stdout, {
